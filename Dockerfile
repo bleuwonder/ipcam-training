@@ -7,8 +7,9 @@ ENV PYTHONUNBUFFERED=1
 # System dependencies
 RUN apt-get update && apt-get install -y \
     python3.11 \
-    python3.11-venv \
+    python3.11-dev \
     python3-pip \
+    python3.11-distutils \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
@@ -17,9 +18,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Python 3.11 as default
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
-    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+# Bootstrap pip for Python 3.11 specifically, then set as default python/pip
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/pip pip /usr/local/bin/pip3.11 1
 
 WORKDIR /app
 
