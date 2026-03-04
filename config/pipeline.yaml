@@ -1,0 +1,190 @@
+frigate:
+  # Frigate NVR address — overridden by FRIGATE_URL env var in docker-compose.
+  # When running in Docker: http://frigate:8971 (Docker service name, internal network)
+  # When running on host directly: http://localhost:8971
+  url: "http://frigate:8971"
+
+# ── Cameras to collect training data from ──────────────────────────────────
+# Indoor cams (moss_room, q_room, living_room, entry) excluded — detect disabled
+# LPR cams included: they provide good vehicle data despite being LPR-focused
+cameras:
+  - doorbell           # Reolink, front porch — person, package (suitcase), dog
+  - front_porch_top    # Ubiquiti, front porch/yard — person, cat, dog, bird
+  - front_yard         # Dahua, front yard + street — person, car, bicycle
+  - driveway           # Dahua, driveway — person, car, motorcycle, bicycle
+  - south              # Dahua, south — person, cat
+  - greenhouse         # Dahua, greenhouse — person, cat
+  - north_garage       # Dahua, north garage — person, cat
+  - back_porch         # Ubiquiti, back porch — person, cat, dog
+  - backyard           # Ubiquiti, backyard — person, cat, dog
+  - garage             # Ubiquiti, garage — person
+  - lpr_south_camera   # Dahua LPR south — vehicles, person
+  - lpr_north_camera   # Dahua LPR north — vehicles, person
+
+# ── Class mapping ───────────────────────────────────────────────────────────
+# Maps COCO labels that Frigate currently tracks → our 4 custom training classes
+# Key insight: Frigate uses "suitcase" as a proxy for packages — this maps it correctly
+classes:
+  coco_to_custom:
+    person: human
+    suitcase: package      # Frigate's current "package" proxy class
+    car: vehicle
+    truck: vehicle
+    bus: vehicle
+    motorcycle: vehicle
+    bicycle: vehicle
+    cat: animal
+    dog: animal
+    bird: animal
+  custom:
+    - human
+    - package
+    - animal
+    - vehicle
+
+# ── Collection settings ─────────────────────────────────────────────────────
+collection:
+  poll_interval_minutes: 15
+  batch_trigger_size: 200   # Queue this many images before auto-labeling
+  min_per_class: 30         # Min per class before batch is triggered
+  max_batch_size: 500       # Max images per batch (keeps review manageable)
+  dedup_window_seconds: 30  # Skip events from same camera within this window
+
+# ── CLIP classifier ─────────────────────────────────────────────────────────
+classifier:
+  clip:
+    model: "ViT-L-14"
+    pretrained: "openai"
+    device: "cuda:0"
+    auto_approve_threshold: 0.80   # CLIP ≥80% → auto-approve, no human needed
+    uncertain_threshold: 0.40      # CLIP <40% → straight to human review
+    prompts:
+      human:
+        - "a photo of a person"
+        - "a photo of a human walking"
+        - "a photo of someone at a front door"
+      vehicle:
+        - "a photo of a car"
+        - "a photo of a truck"
+        - "a photo of a van"
+        - "a photo of a motorcycle"
+        - "a photo of a bicycle"
+        - "a photo of an SUV in a driveway"
+      animal:
+        - "a photo of a dog"
+        - "a photo of a cat"
+        - "a photo of a deer"
+        - "a photo of a bird"
+        - "a photo of a raccoon"
+        - "a photo of a squirrel"
+      package:
+        - "a photo of a delivery package on a porch"
+        - "a photo of a cardboard box"
+        - "a photo of a parcel left at a door"
+        - "a photo of an Amazon package"
+      false_positive:
+        - "a photo of nothing"
+        - "a photo of an empty porch"
+        - "a photo of a shadow or reflection"
+
+  google_vision:
+    enabled: true   # Used as second opinion when CLIP is uncertain (40-80%)
+    label_mapping:
+      Person: human
+      Man: human
+      Woman: human
+      Human: human
+      Car: vehicle
+      Truck: vehicle
+      Vehicle: vehicle
+      Motor vehicle: vehicle
+      Motorcycle: vehicle
+      Bicycle: vehicle
+      Dog: animal
+      Cat: animal
+      Animal: animal
+      Bird: animal
+      Deer: animal
+      Package delivery: package
+      Cardboard: package
+      Box: package
+      Shipping box: package
+      Parcel: package
+      Luggage: package      # suitcase mis-labels sometimes look like luggage
+
+# ── Grounding DINO package discovery ───────────────────────────────────────
+# These cameras face porches/doorsteps where packages would appear.
+# Run periodically: python cli.py discover run
+package_discovery:
+  enabled: true
+  grounding_dino:
+    prompts:
+      - "delivery package"
+      - "cardboard box on porch"
+      - "parcel left at door"
+      - "Amazon package"
+    confidence_threshold: 0.3
+    cameras:
+      - doorbell        # Reolink, main front porch
+      - front_porch_top # Ubiquiti, covers front porch from above
+      - back_porch      # Ubiquiti, back porch deliveries
+
+# ── Label Studio ────────────────────────────────────────────────────────────
+label_studio:
+  url: "http://localhost:8080"
+  project_name: "Frigate Training Pipeline"
+
+# ── Training ────────────────────────────────────────────────────────────────
+training:
+  model_base: "yolo11m.pt"
+  imgsz: 640          # Training image size
+  export_imgsz: 320   # Inference image size exported to Frigate
+  epochs: 100
+  batch_size: 8       # Fits in 10GB VRAM with AMP
+  patience: 20
+  device: 0           # GPU index (RTX 3080)
+  amp: true           # Mixed precision — keeps VRAM usage manageable
+  min_training_images: 400
+  min_per_class: 100
+  retrain_trigger: 500   # New approved images since last train to trigger re-train
+  quality_gates:
+    min_map50: 0.70
+    min_per_class_map50: 0.50
+
+# ── Deployment ───────────────────────────────────────────────────────────────
+# Update frigate_model_dir to the actual path of your Frigate config volume
+# (wherever /config maps to on your Docker host)
+deployment:
+  export_format: onnx
+  # In Docker: /opt/frigate/config is mounted as /frigate-config in the container.
+  # FRIGATE_MODEL_DIR env var overrides this — set in training/compose.yml.
+  # On the Docker host this resolves to: /opt/frigate/config/models/
+  frigate_model_dir: "/frigate-config/models"
+  keep_versions: 3
+  auto_deploy: false
+
+# ──────────────────────────────────────────────────────────────────────────
+# FRIGATE CONFIG CHANGES NEEDED AFTER FIRST MODEL IS TRAINED:
+#
+# 1. Replace the current model section with:
+#
+#   detectors:
+#     ov:
+#       type: openvino
+#       device: CPU
+#
+#   model:
+#     model_type: yolo-generic      # was: yolonas
+#     width: 320                    # was: 640
+#     height: 320                   # was: 640
+#     input_tensor: nchw
+#     path: /config/models/best.onnx
+#     labelmap_path: /config/models/labelmap.txt
+#
+# 2. Update objects.track to use new class names:
+#
+#   objects:
+#     track: [human, package, animal, vehicle]
+#
+# 3. Update zone objects in each camera to use new names too.
+# ──────────────────────────────────────────────────────────────────────────

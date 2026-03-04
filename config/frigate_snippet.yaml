@@ -1,0 +1,58 @@
+# ============================================================
+# Frigate Config Changes Required
+# ============================================================
+# Add these to your Frigate config.yml
+
+# 1. Enable clean snapshots for all cameras (or per-camera)
+snapshots:
+  enabled: true
+  clean_copy: true       # REQUIRED: saves unannotated copy for training
+  crop: false            # Keep full frame for training
+  quality: 95
+  timestamp: false
+  bounding_box: true
+  retain:
+    default: 30          # Keep snapshots 30 days
+
+# 2. Track all relevant objects
+objects:
+  track:
+    - person
+    - car
+    - motorcycle
+    - bicycle
+    - truck
+    - bus
+    - cat
+    - dog
+    - bird
+  filters:
+    person:
+      min_score: 0.5
+    car:
+      min_score: 0.5
+
+# ============================================================
+# AFTER deploying your first custom model, replace the above
+# with these settings:
+# ============================================================
+
+# detectors:
+#   onnx:
+#     type: onnx
+#
+# model:
+#   model_type: yolo-generic
+#   width: 320
+#   height: 320
+#   input_tensor: nchw
+#   input_dtype: float
+#   path: /config/models/best.onnx
+#   labelmap_path: /config/models/labelmap.txt
+#
+# objects:
+#   track:
+#     - human
+#     - package
+#     - animal
+#     - vehicle

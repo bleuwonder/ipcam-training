@@ -1,0 +1,13 @@
+data/
+models/
+runs/
+pipeline.db
+.env
+__pycache__/
+*.pyc
+label-studio-data/
+*.onnx
+*.pt
+*.pth
+.claude/
+config/gcp-credentials.json
