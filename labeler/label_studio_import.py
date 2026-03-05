@@ -36,6 +36,9 @@ class LabelStudioImporter:
             from label_studio_sdk import Client
 
             self._client = Client(url=self.ls_url, api_key=self.api_key)
+            # LS 1.14+ disables legacy Token auth in favour of JWT Bearer auth.
+            # The SDK still sends "Token <key>" by default, so we override it.
+            self._client.session.headers["Authorization"] = f"Bearer {self.api_key}"
             logger.info(f"Connected to Label Studio at {self.ls_url}")
         return self._client
 
