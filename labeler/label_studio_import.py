@@ -1,10 +1,10 @@
 """Import flagged detections into Label Studio for human review."""
 
-import json
 import logging
 import os
 from pathlib import Path
 
+import requests
 import yaml
 
 from collector.db import Batch, Classification, Event, get_session
@@ -13,7 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 class LabelStudioImporter:
-    """Pushes flagged (uncertain) detections to Label Studio with pre-annotations."""
+    """Pushes flagged (uncertain) detections to Label Studio with pre-annotations.
+
+    Uses the Label Studio REST API directly with Bearer authentication.
+    LS 1.14+ disabled legacy DRF Token auth; API keys are now JWT access tokens
+    sent as 'Authorization: Bearer <token>'.
+    """
 
     def __init__(self, config_path: str = "config/pipeline.yaml"):
         with open(config_path) as f:
@@ -22,34 +27,66 @@ class LabelStudioImporter:
         self.ls_url = os.environ.get(
             "LABEL_STUDIO_URL",
             self.config["label_studio"]["url"],
-        )
+        ).rstrip("/")
         self.api_key = os.environ.get("LABEL_STUDIO_API_KEY", "")
         self.project_name = self.config["label_studio"]["project_name"]
         self.classes = self.config["classes"]["custom"]
 
-        self._client = None
+        self._session = None
 
     @property
-    def client(self):
-        """Lazy-load Label Studio SDK client."""
-        if self._client is None:
-            from label_studio_sdk import Client
-
-            self._client = Client(url=self.ls_url, api_key=self.api_key)
-            # LS 1.14+ disables legacy Token auth in favour of JWT Bearer auth.
-            # The SDK sets auth in self.headers (not session.headers), so override there.
-            self._client.headers["Authorization"] = f"Bearer {self.api_key}"
+    def session(self):
+        """Lazy-load HTTP session with Bearer auth header."""
+        if self._session is None:
+            self._session = requests.Session()
+            self._session.headers["Authorization"] = f"Bearer {self.api_key}"
+            self._session.headers["Content-Type"] = "application/json"
+            # Quick connectivity check
+            resp = self._session.get(f"{self.ls_url}/api/current-user/whoami", timeout=10)
+            resp.raise_for_status()
             logger.info(f"Connected to Label Studio at {self.ls_url}")
-        return self._client
+        return self._session
 
-    def get_or_create_project(self):
+    # ── Low-level API helpers ──────────────────────────────────────────────
+
+    def _get_projects(self) -> list[dict]:
+        resp = self.session.get(f"{self.ls_url}/api/projects", timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("results", resp.json())
+
+    def _create_project(self, title: str, label_config: str) -> dict:
+        resp = self.session.post(
+            f"{self.ls_url}/api/projects",
+            json={"title": title, "label_config": label_config},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _import_tasks(self, project_id: int, tasks: list[dict]) -> dict:
+        """Import tasks in chunks of 250 to avoid LS request size limits."""
+        total = 0
+        chunk_size = 250
+        for i in range(0, len(tasks), chunk_size):
+            chunk = tasks[i : i + chunk_size]
+            resp = self.session.post(
+                f"{self.ls_url}/api/projects/{project_id}/import",
+                json=chunk,
+                timeout=120,
+            )
+            resp.raise_for_status()
+            total += len(chunk)
+        return {"imported": total}
+
+    # ── Project management ─────────────────────────────────────────────────
+
+    def get_or_create_project(self) -> dict:
         """Get existing project or create a new one with object detection config."""
-        projects = self.client.get_projects()
-        for project in projects:
-            if project.title == self.project_name:
+        for project in self._get_projects():
+            if project.get("title") == self.project_name:
                 return project
 
-        # Create label config for object detection with our classes
+        # Build label config for object detection with our classes
         label_choices = "\n".join(
             f'        <Label value="{cls}" />' for cls in self.classes
         )
@@ -62,12 +99,11 @@ class LabelStudioImporter:
   </RectangleLabels>
 </View>"""
 
-        project = self.client.create_project(
-            title=self.project_name,
-            label_config=label_config,
-        )
+        project = self._create_project(self.project_name, label_config)
         logger.info(f"Created Label Studio project: {self.project_name}")
         return project
+
+    # ── Main import ────────────────────────────────────────────────────────
 
     def import_flagged_events(self, batch_id: str | None = None) -> int:
         """Import all flagged-for-review events into Label Studio.
@@ -77,11 +113,10 @@ class LabelStudioImporter:
 
         Returns number of tasks created.
         """
-        session = get_session()
+        db_session = get_session()
         try:
-            # Find flagged classifications
             query = (
-                session.query(Classification, Event)
+                db_session.query(Classification, Event)
                 .join(Event, Classification.event_id == Event.id)
                 .filter(Classification.decision == "flagged_review")
                 .filter(Classification.human_reviewed == False)
@@ -93,25 +128,25 @@ class LabelStudioImporter:
                 return 0
 
             project = self.get_or_create_project()
+            project_id = project["id"]
             tasks = []
 
             for classification, event in results:
-                # Build the task with pre-annotation
                 image_path = event.snapshot_path
                 if not image_path or not Path(image_path).exists():
                     logger.warning(f"Snapshot missing for event {event.id}")
                     continue
 
                 # For local files, Label Studio needs the path relative to
-                # LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT
-                # Since we mount ./data to /data, strip the data/ prefix
+                # LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT (/data inside the container).
+                # Our snapshots are at data/raw/... so strip the leading "data/".
                 relative_path = str(Path(image_path))
                 if relative_path.startswith("data/"):
-                    relative_path = relative_path[5:]  # Remove "data/" prefix
+                    relative_path = relative_path[5:]
 
-                # Pre-annotation with suggested bounding box and label
+                # Pre-annotation with suggested bounding box and CLIP label
                 predictions = []
-                if event.box_x is not None:
+                if event.box_x is not None and event.box_w and event.box_w > 0:
                     predictions.append(
                         {
                             "model_version": "clip_classifier",
@@ -135,38 +170,38 @@ class LabelStudioImporter:
                         }
                     )
 
-                task = {
-                    "data": {
-                        "image": f"/data/local-files/?d={relative_path}",
-                        "frigate_label": event.frigate_label,
-                        "frigate_score": f"{event.frigate_score:.2f}",
-                        "clip_label": classification.clip_label or "N/A",
-                        "clip_score": f"{classification.clip_score:.2f}"
-                        if classification.clip_score
-                        else "N/A",
-                        "google_label": classification.google_label or "N/A",
-                        "google_score": f"{classification.google_score:.2f}"
-                        if classification.google_score
-                        else "N/A",
-                        "event_id": event.id,
-                        "camera": event.camera,
-                    },
-                    "predictions": predictions,
-                }
-                tasks.append(task)
+                tasks.append(
+                    {
+                        "data": {
+                            "image": f"/data/local-files/?d={relative_path}",
+                            "frigate_label": event.frigate_label,
+                            "frigate_score": f"{event.frigate_score:.2f}",
+                            "clip_label": classification.clip_label or "N/A",
+                            "clip_score": f"{classification.clip_score:.2f}"
+                            if classification.clip_score
+                            else "N/A",
+                            "google_label": classification.google_label or "N/A",
+                            "google_score": f"{classification.google_score:.2f}"
+                            if classification.google_score
+                            else "N/A",
+                            "event_id": event.id,
+                            "camera": event.camera,
+                        },
+                        "predictions": predictions,
+                    }
+                )
 
             if tasks:
-                project.import_tasks(tasks)
+                self._import_tasks(project_id, tasks)
                 logger.info(f"Imported {len(tasks)} tasks into Label Studio")
 
-                # Update batch status if applicable
                 if batch_id:
-                    batch = session.query(Batch).filter_by(id=batch_id).first()
+                    batch = db_session.query(Batch).filter_by(id=batch_id).first()
                     if batch:
                         batch.status = "reviewing"
-                        batch.label_studio_project_id = project.id
-                        session.commit()
+                        batch.label_studio_project_id = project_id
+                        db_session.commit()
 
             return len(tasks)
         finally:
-            session.close()
+            db_session.close()
