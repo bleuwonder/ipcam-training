@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 class LabelStudioImporter:
     """Pushes flagged (uncertain) detections to Label Studio with pre-annotations.
 
-    Uses the Label Studio REST API directly with Bearer authentication.
-    LS 1.14+ disabled legacy DRF Token auth; API keys are now JWT access tokens
-    sent as 'Authorization: Bearer <token>'.
+    Uses the Label Studio REST API directly with legacy Token authentication.
+    LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN=true re-enables the opaque DRF token
+    in LS 1.17+. Use 'Authorization: Token <opaque_token>' — no expiry, no refresh.
     """
 
     def __init__(self, config_path: str = "config/pipeline.yaml"):
@@ -39,7 +39,7 @@ class LabelStudioImporter:
         """Lazy-load HTTP session with Bearer auth header."""
         if self._session is None:
             self._session = requests.Session()
-            self._session.headers["Authorization"] = f"Bearer {self.api_key}"
+            self._session.headers["Authorization"] = f"Token {self.api_key}"
             self._session.headers["Content-Type"] = "application/json"
             # Quick connectivity check
             resp = self._session.get(f"{self.ls_url}/api/current-user/whoami", timeout=10)
