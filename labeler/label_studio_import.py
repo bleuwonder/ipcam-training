@@ -15,9 +15,11 @@ logger = logging.getLogger(__name__)
 class LabelStudioImporter:
     """Pushes flagged (uncertain) detections to Label Studio with pre-annotations.
 
-    Uses the Label Studio REST API directly with legacy Token authentication.
-    LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN=true re-enables the opaque DRF token
-    in LS 1.17+. Use 'Authorization: Token <opaque_token>' — no expiry, no refresh.
+    Auth flow (LS 1.17+):
+      LABEL_STUDIO_API_KEY is the non-expiring PAT (JWT refresh token) from
+      Account & Settings → Personal Access Token.
+      We exchange it for a short-lived access token via POST /api/token/refresh/
+      and use that as 'Authorization: Bearer <access>'. On 401 we re-exchange.
     """
 
     def __init__(self, config_path: str = "config/pipeline.yaml"):
@@ -28,39 +30,58 @@ class LabelStudioImporter:
             "LABEL_STUDIO_URL",
             self.config["label_studio"]["url"],
         ).rstrip("/")
-        self.api_key = os.environ.get("LABEL_STUDIO_API_KEY", "")
+        # PAT = non-expiring JWT refresh token from the LS UI
+        self.pat = os.environ.get("LABEL_STUDIO_API_KEY", "")
         self.project_name = self.config["label_studio"]["project_name"]
         self.classes = self.config["classes"]["custom"]
 
         self._session = None
 
+    def _refresh_access_token(self):
+        """Exchange the PAT for a fresh short-lived access token."""
+        resp = requests.post(
+            f"{self.ls_url}/api/token/refresh/",
+            json={"refresh": self.pat},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        access = resp.json()["access"]
+        self._session.headers["Authorization"] = f"Bearer {access}"
+
     @property
     def session(self):
-        """Lazy-load HTTP session with Bearer auth header."""
+        """Lazy-load HTTP session; exchanges PAT for access token on first use."""
         if self._session is None:
             self._session = requests.Session()
-            self._session.headers["Authorization"] = f"Token {self.api_key}"
             self._session.headers["Content-Type"] = "application/json"
-            # Quick connectivity check
+            self._refresh_access_token()
             resp = self._session.get(f"{self.ls_url}/api/current-user/whoami", timeout=10)
             resp.raise_for_status()
             logger.info(f"Connected to Label Studio at {self.ls_url}")
         return self._session
 
+    def _request(self, method: str, path: str, **kwargs):
+        """Make an authenticated request, re-exchanging PAT on token expiry."""
+        resp = getattr(self.session, method)(f"{self.ls_url}{path}", **kwargs)
+        if resp.status_code == 401:
+            logger.debug("Access token expired — refreshing")
+            self._refresh_access_token()
+            resp = getattr(self.session, method)(f"{self.ls_url}{path}", **kwargs)
+        resp.raise_for_status()
+        return resp
+
     # ── Low-level API helpers ──────────────────────────────────────────────
 
     def _get_projects(self) -> list[dict]:
-        resp = self.session.get(f"{self.ls_url}/api/projects", timeout=30)
-        resp.raise_for_status()
+        resp = self._request("get", "/api/projects", timeout=30)
         return resp.json().get("results", resp.json())
 
     def _create_project(self, title: str, label_config: str) -> dict:
-        resp = self.session.post(
-            f"{self.ls_url}/api/projects",
+        resp = self._request(
+            "post", "/api/projects",
             json={"title": title, "label_config": label_config},
             timeout=30,
         )
-        resp.raise_for_status()
         return resp.json()
 
     def _import_tasks(self, project_id: int, tasks: list[dict]) -> dict:
@@ -69,12 +90,11 @@ class LabelStudioImporter:
         chunk_size = 250
         for i in range(0, len(tasks), chunk_size):
             chunk = tasks[i : i + chunk_size]
-            resp = self.session.post(
-                f"{self.ls_url}/api/projects/{project_id}/import",
+            self._request(
+                "post", f"/api/projects/{project_id}/import",
                 json=chunk,
                 timeout=120,
             )
-            resp.raise_for_status()
             total += len(chunk)
         return {"imported": total}
 
