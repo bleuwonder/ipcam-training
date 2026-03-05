@@ -23,7 +23,7 @@ numpy>=1.24.0,<2.0.0
 sqlalchemy>=2.0.0
 
 # Label Studio integration
-label-studio-sdk>=1.0.0
+label-studio-sdk>=1.0.0,<2.0.0
 
 # CLI & config
 click>=8.1.0
