@@ -23,11 +23,17 @@ class FrigateEvent:
 class FrigateClient:
     """Client for Frigate's HTTP API."""
 
-    def __init__(self, base_url: str | None = None):
+    def __init__(self, base_url: str | None = None, api_key: str | None = None):
         self.base_url = (
             base_url or os.environ.get("FRIGATE_URL", "http://localhost:5000")
         ).rstrip("/")
         self.session = requests.Session()
+
+        # Frigate 0.14+ requires authentication. Supply an API key generated in
+        # the Frigate UI (Settings → Authentication) via FRIGATE_API_KEY env var.
+        key = api_key or os.environ.get("FRIGATE_API_KEY", "")
+        if key:
+            self.session.headers["Authorization"] = f"Bearer {key}"
 
     def get_events(
         self,
@@ -107,9 +113,14 @@ class FrigateClient:
         return resp.content
 
     def health_check(self) -> bool:
-        """Check if Frigate is reachable."""
+        """Check if Frigate is reachable (any HTTP response counts as reachable).
+
+        A 401 means auth is required but the server is up — that's fine, the
+        Authorization header will be sent on real API calls.
+        A connection error means Frigate is genuinely unreachable.
+        """
         try:
-            resp = self.session.get(f"{self.base_url}/api/version", timeout=5)
-            return resp.ok
+            self.session.get(f"{self.base_url}/api/version", timeout=5)
+            return True
         except requests.RequestException:
             return False
