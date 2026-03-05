@@ -23,17 +23,13 @@ class FrigateEvent:
 class FrigateClient:
     """Client for Frigate's HTTP API."""
 
-    def __init__(self, base_url: str | None = None, api_key: str | None = None):
+    def __init__(self, base_url: str | None = None):
         self.base_url = (
             base_url or os.environ.get("FRIGATE_URL", "http://localhost:5000")
         ).rstrip("/")
         self.session = requests.Session()
-
-        # Frigate 0.14+ requires authentication. Supply an API key generated in
-        # the Frigate UI (Settings → Authentication) via FRIGATE_API_KEY env var.
-        key = api_key or os.environ.get("FRIGATE_API_KEY", "")
-        if key:
-            self.session.headers["Authorization"] = f"Bearer {key}"
+        # Port 5000 is Frigate's unauthenticated internal port — no auth headers needed.
+        # Use http://frigate:5000 (container-to-container) rather than port 8971.
 
     def get_events(
         self,
