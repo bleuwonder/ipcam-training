@@ -61,21 +61,31 @@ class FrigateClient:
 
         events = []
         for raw in resp.json():
-            # Frigate returns box as [y1, x1, y2, x2] normalized
-            # Convert to [x, y, w, h]
-            raw_box = raw.get("box") or [0, 0, 0, 0]  # box can be null/None in API
+            # Frigate 0.17: bounding box and scores are nested under raw["data"].
+            # Top-level box/score fields are null for in-progress or older events.
+            # data.box format is [x, y, width, height] normalized 0-1.
+            data = raw.get("data") or {}
+            raw_box = data.get("box") or [0, 0, 0, 0]
             if len(raw_box) == 4:
-                y1, x1, y2, x2 = raw_box
-                box = (x1, y1, x2 - x1, y2 - y1)
+                x, y, w, h = raw_box
+                box = (x, y, w, h)
             else:
-                box = (0, 0, 0, 0)
+                box = (0.0, 0.0, 0.0, 0.0)
+
+            score = (
+                data.get("top_score")
+                or data.get("score")
+                or raw.get("top_score")
+                or raw.get("score")
+                or 0.0
+            )
 
             events.append(
                 FrigateEvent(
                     id=raw["id"],
                     camera=raw["camera"],
                     label=raw["label"],
-                    score=raw.get("top_score") or raw.get("score") or 0.0,
+                    score=score,
                     box=box,
                     start_time=datetime.fromtimestamp(raw["start_time"]),
                     has_snapshot=raw.get("has_snapshot", False),
