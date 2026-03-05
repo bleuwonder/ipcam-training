@@ -121,6 +121,24 @@ class LabelStudioImporter:
 
         project = self._create_project(self.project_name, label_config)
         logger.info(f"Created Label Studio project: {self.project_name}")
+
+        # Register /data/raw as a local storage so the file-serving view
+        # authorises requests for snapshots (it checks for a matching storage record).
+        try:
+            self._request(
+                "post", "/api/storages/localfiles/",
+                json={
+                    "project": project["id"],
+                    "path": "/data/raw",
+                    "title": "Frigate Raw Snapshots",
+                    "use_blob_urls": False,
+                },
+                timeout=15,
+            )
+            logger.info("Registered /data/raw local storage for file serving")
+        except Exception:
+            logger.warning("Could not register local storage — images may not load")
+
         return project
 
     # ── Main import ────────────────────────────────────────────────────────
