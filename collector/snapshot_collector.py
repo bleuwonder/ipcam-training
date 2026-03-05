@@ -174,11 +174,16 @@ class SnapshotCollector:
             f"Starting snapshot collector (polling every {self.poll_interval}s)"
         )
 
-        if not self.client.health_check():
-            logger.error(
-                f"Cannot reach Frigate at {self.client.base_url}. Check FRIGATE_URL."
+        # Wait for Frigate to become available before starting the collection loop.
+        # Retries with exponential backoff (max 5 min) so the container stays up
+        # even if Frigate is still starting or temporarily unreachable.
+        retry_delay = 10
+        while not self.client.health_check():
+            logger.warning(
+                f"Cannot reach Frigate at {self.client.base_url} — retrying in {retry_delay}s"
             )
-            return
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 300)
 
         logger.info(f"Connected to Frigate at {self.client.base_url}")
 
