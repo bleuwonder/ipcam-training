@@ -63,7 +63,7 @@ class FrigateClient:
         for raw in resp.json():
             # Frigate returns box as [y1, x1, y2, x2] normalized
             # Convert to [x, y, w, h]
-            raw_box = raw.get("box", [0, 0, 0, 0])
+            raw_box = raw.get("box") or [0, 0, 0, 0]  # box can be null/None in API
             if len(raw_box) == 4:
                 y1, x1, y2, x2 = raw_box
                 box = (x1, y1, x2 - x1, y2 - y1)
