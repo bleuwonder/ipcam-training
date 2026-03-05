@@ -75,7 +75,7 @@ class FrigateClient:
                     id=raw["id"],
                     camera=raw["camera"],
                     label=raw["label"],
-                    score=raw.get("top_score", raw.get("score", 0.0)),
+                    score=raw.get("top_score") or raw.get("score") or 0.0,
                     box=box,
                     start_time=datetime.fromtimestamp(raw["start_time"]),
                     has_snapshot=raw.get("has_snapshot", False),
