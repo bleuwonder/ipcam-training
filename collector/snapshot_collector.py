@@ -100,28 +100,28 @@ class SnapshotCollector:
         snapshot_path = camera_dir / f"{event.id}.png"
         img.save(snapshot_path, "PNG")
 
-        # Crop the detection region
+        # Crop the detection region (skip if box is null/zero — e.g. audio events)
+        crop_path = None
         x, y, w, h = event.box
-        # Convert normalized coordinates to pixels
-        px_x = int(x * img_w)
-        px_y = int(y * img_h)
-        px_w = int(w * img_w)
-        px_h = int(h * img_h)
-        # Add padding (10% on each side)
-        pad_x = int(px_w * 0.1)
-        pad_y = int(px_h * 0.1)
-        crop_box = (
-            max(0, px_x - pad_x),
-            max(0, px_y - pad_y),
-            min(img_w, px_x + px_w + pad_x),
-            min(img_h, px_y + px_h + pad_y),
-        )
-        crop = img.crop(crop_box)
-
-        crop_camera_dir = self.crop_dir / event.camera / date_str
-        crop_camera_dir.mkdir(parents=True, exist_ok=True)
-        crop_path = crop_camera_dir / f"{event.id}.png"
-        crop.save(crop_path, "PNG")
+        if w > 0 and h > 0:
+            # Convert normalized coordinates to pixels
+            px_x = int(x * img_w)
+            px_y = int(y * img_h)
+            px_w = int(w * img_w)
+            px_h = int(h * img_h)
+            # Add padding (10% on each side)
+            pad_x = int(px_w * 0.1)
+            pad_y = int(px_h * 0.1)
+            left   = max(0, px_x - pad_x)
+            top    = max(0, px_y - pad_y)
+            right  = min(img_w, px_x + px_w + pad_x)
+            bottom = min(img_h, px_y + px_h + pad_y)
+            if right > left and bottom > top:
+                crop = img.crop((left, top, right, bottom))
+                crop_camera_dir = self.crop_dir / event.camera / date_str
+                crop_camera_dir.mkdir(parents=True, exist_ok=True)
+                crop_path = crop_camera_dir / f"{event.id}.png"
+                crop.save(crop_path, "PNG")
 
         # Save to database
         db_event = Event(
@@ -134,7 +134,7 @@ class SnapshotCollector:
             box_w=event.box[2],
             box_h=event.box[3],
             snapshot_path=str(snapshot_path),
-            crop_path=str(crop_path),
+            crop_path=str(crop_path) if crop_path else None,
             start_time=event.start_time,
         )
         session.add(db_event)
